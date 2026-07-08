@@ -1,0 +1,39 @@
+name: release
+
+# Build the extension and attach the packaged zip whenever a version tag is pushed.
+on:
+  push:
+    tags:
+      - '*'
+
+permissions:
+  contents: write      # create the release and upload the asset
+  id-token: write      # sign the build provenance attestation
+  attestations: write  # record the attestation
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build extension
+        run: npm run build   # produces build/Willhaben-ImmoMap.zip
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: build/Willhaben-ImmoMap.zip
+
+      - name: Create release and upload asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/Willhaben-ImmoMap.zip
+          generate_release_notes: true
