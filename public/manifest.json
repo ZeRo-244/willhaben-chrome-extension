@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Willhaben Map",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "description": "Willhaben Immo-Karte",
   "icons": {
     "16": "icons/icon16.png",
