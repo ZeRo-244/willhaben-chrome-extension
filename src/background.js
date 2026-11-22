@@ -38,7 +38,7 @@ async function scrapeDataAndOpenMap(searchUrl) {
     const totalPages = Math.ceil(initialJSON.rowsFound / initialJSON.rowsRequested);
     const pageUrls = Array.from({ length: totalPages }, (_, i) => replacePageParameter(initMaxRowFirstPageURL, i + 1));
 
-    chrome.runtime.sendMessage({ type: 'progress', text: '1 / ' + totalPages });
+    notifyPopup({ type: 'progress', text: '1 / ' + totalPages });
 
     const fetchedData = [];
     fetchedData.push(initialJSON);
@@ -48,26 +48,73 @@ async function scrapeDataAndOpenMap(searchUrl) {
       if (extractedData) {
         fetchedData.push(extractedData);
       }
-      chrome.runtime.sendMessage({ type: 'progress', text: i + ' / ' + totalPages });
+      notifyPopup({ type: 'progress', text: i + ' / ' + totalPages });
     }
 
     let mergedData = mergeData(fetchedData);
 
-    mergedData = mergedData.filter(item => item.attributes.attribute.filter(e => e.name == 'COORDINATES')[0]);
     mergedData = mergedData.filter(item => item.attributes.attribute.filter(e => e.name == 'PRICE_FOR_DISPLAY')[0]);
     mergedData = mergedData.filter(item => item.contextLinkList.contextLink.filter((e) => e.id == 'iadShareLink')[0]);
-    const dataToSend = mergedData.map(item => ({
-      coordinates: item.attributes.attribute.filter((e) => e.name == 'COORDINATES')[0].values[0],
-      imageUrl: item.advertImageList.advertImage.length > 0 ? item.advertImageList.advertImage[0].mainImageUrl : '',
-      detailUrl: item.contextLinkList.contextLink.filter((e) => e.id == 'iadShareLink')[0].uri,
-      price: item.attributes.attribute.filter((e) => e.name == 'PRICE_FOR_DISPLAY')[0].values[0],
-      description: item.description
-    }));
+    const coordinates = await resolveCoordinates(mergedData);
+    const dataToSend = mergedData
+      .filter(item => coordinates[item.id])
+      .map(item => ({
+        coordinates: coordinates[item.id],
+        imageUrl: item.advertImageList.advertImage.length > 0 ? item.advertImageList.advertImage[0].mainImageUrl : '',
+        detailUrl: item.contextLinkList.contextLink.filter((e) => e.id == 'iadShareLink')[0].uri,
+        price: item.attributes.attribute.filter((e) => e.name == 'PRICE_FOR_DISPLAY')[0].values[0],
+        description: item.description
+      }));
     openMap(dataToSend);
   } catch (error) {
     console.log('Error fetching Data', error);
   }
-  chrome.runtime.sendMessage({ type: 'loadingDone' });
+  notifyPopup({ type: 'loadingDone' });
+}
+
+// willhaben's search results no longer carry the COORDINATES attribute; only the
+// ad detail page does. Use the search attribute when present, else a cached value,
+// else fetch the detail page. Coordinates are cached per ad id in storage.local.
+const detailConcurrency = 8;
+const coordCacheKey = 'coordCache';
+
+function searchCoordinates(item) {
+  const attr = item.attributes.attribute.find(e => e.name == 'COORDINATES');
+  return attr ? attr.values[0] : null;
+}
+
+async function fetchDetailCoordinates(item) {
+  const url = item.contextLinkList.contextLink.find(e => e.id == 'iadShareLink').uri;
+  const html = await fetchPage(url);
+  const match = html && html.match(/"name":"COORDINATES","values":\["([^"]+)"/);
+  return match ? match[1] : null;
+}
+
+async function resolveCoordinates(items) {
+  const cache = (await chrome.storage.local.get(coordCacheKey))[coordCacheKey] || {};
+  const result = {};
+  const missing = [];
+  for (const item of items) {
+    const coords = searchCoordinates(item) || cache[item.id];
+    if (coords) result[item.id] = coords;
+    else missing.push(item);
+  }
+
+  let done = 0;
+  let next = 0;
+  async function worker() {
+    while (next < missing.length) {
+      const item = missing[next++];
+      const coords = await fetchDetailCoordinates(item);
+      if (coords) result[item.id] = cache[item.id] = coords;
+      done++;
+      notifyPopup({ type: 'progress', text: 'Koordinaten ' + done + ' / ' + missing.length });
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(detailConcurrency, missing.length) }, worker));
+
+  if (missing.length) await chrome.storage.local.set({ [coordCacheKey]: cache });
+  return result;
 }
 
 async function fetchPage(url) {
@@ -132,4 +179,10 @@ function openMap(data) {
   latestScrapedData = data;
   const url = chrome.runtime.getURL('map.html');
   chrome.tabs.create({ url: url });
+}
+
+// Progress updates go to the popup, which may already be closed; ignore the
+// resulting "Receiving end does not exist" rejection.
+function notifyPopup(message) {
+  chrome.runtime.sendMessage(message).catch(() => {});
 }
